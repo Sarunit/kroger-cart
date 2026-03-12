@@ -23,7 +23,7 @@ app.post("/api/token", async (req, res) => {
     const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
     let body;
     if (grant_type === "authorization_code") {
-      body = `grant_type=authorization_code&code=${code}&redirect_uri=${encodeURIComponent(redirect_uri)}`;
+      body = `grant_type=authorization_code&code=${code}&redirect_uri=${encodeURIComponent("https://kroger-cart.onrender.com")}`;
     } else {
       body = `grant_type=client_credentials&scope=${encodeURIComponent(scope || "product.compact")}`;
     }
