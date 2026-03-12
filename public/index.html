@@ -13,7 +13,8 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0f2027; }
     input::placeholder { color: rgba(240,236,226,0.35); }
-    input:focus { border-color: rgba(168,216,168,0.5) !important; outline: none; }
+    textarea::placeholder { color: rgba(240,236,226,0.35); }
+    input:focus, textarea:focus { border-color: rgba(168,216,168,0.5) !important; outline: none; }
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
   </style>
@@ -60,6 +61,13 @@ function App() {
   const [view, setView]               = useState("search");
   const [tokenError, setTokenError]   = useState(null);
 
+  // Bulk search state
+  const [bulkText, setBulkText]           = useState("");
+  const [bulkResults, setBulkResults]     = useState([]); // [{ingredient, product, selected}]
+  const [bulkLoading, setBulkLoading]     = useState(false);
+  const [bulkProgress, setBulkProgress]   = useState(0);
+  const [bulkDone, setBulkDone]           = useState(false);
+
   const setCart = (cartOrFn) => {
     setCartRaw(prev => {
       const next = typeof cartOrFn === "function" ? cartOrFn(prev) : cartOrFn;
@@ -76,7 +84,7 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     const code = params.get("code");
     if (code) {
-      const redirectUri = window.location.origin + window.location.pathname;
+      const redirectUri = "https://kroger-cart.onrender.com";
       api.exchangeCode(code, redirectUri).then(d => {
         if (d.access_token) {
           sessionStorage.setItem("kroger_user_token", d.access_token);
@@ -91,7 +99,7 @@ function App() {
 
   const loginWithKroger = () => {
     saveCart(cart);
-    const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
+    const redirectUri = encodeURIComponent("https://kroger-cart.onrender.com");
     const scope = encodeURIComponent("cart.basic:write profile.compact");
     window.location.href = `${AUTH_URL}?client_id=${CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}`;
   };
@@ -106,6 +114,69 @@ function App() {
       if (!data.data) throw new Error(data.error || "No results");
       setResults(data.data);
     } catch(e) { setError(e.message); } finally { setLoading(false); }
+  };
+
+  // Parse the bulk ingredient list
+  const parseIngredients = (text) => {
+    return text.split("\n")
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+      .map(line => {
+        // Strip leading bullets, dashes, numbers
+        return line.replace(/^[-•*\d.]+\s*/, "").trim();
+      })
+      .filter(line => line.length > 0);
+  };
+
+  // Run bulk search — one ingredient at a time
+  const runBulkSearch = async () => {
+    const ingredients = parseIngredients(bulkText);
+    if (!ingredients.length || !clientToken) return;
+    setBulkLoading(true);
+    setBulkDone(false);
+    setBulkResults([]);
+    setBulkProgress(0);
+
+    const found = [];
+    for (let i = 0; i < ingredients.length; i++) {
+      const ingredient = ingredients[i];
+      try {
+        const data = await api.search(ingredient, clientToken);
+        const product = data.data?.[0] || null;
+        found.push({ ingredient, product, selected: !!product });
+      } catch(e) {
+        found.push({ ingredient, product: null, selected: false });
+      }
+      setBulkProgress(i + 1);
+      setBulkResults([...found]);
+    }
+
+    setBulkLoading(false);
+    setBulkDone(true);
+  };
+
+  // Add all selected bulk results to cart
+  const addBulkToCart = () => {
+    const toAdd = bulkResults.filter(r => r.selected && r.product);
+    toAdd.forEach(r => {
+      const p = r.product;
+      const existing = cart.find(i => i.productId === p.productId);
+      if (existing) {
+        setCart(prev => prev.map(i => i.productId === p.productId ? { ...i, qty: i.qty + 1 } : i));
+      } else {
+        const price = p.items?.[0]?.price?.regular ?? null;
+        const img = p.images?.[0]?.sizes?.find(s => s.size === "thumbnail")?.url || p.images?.[0]?.sizes?.[0]?.url || null;
+        setCart(prev => [...prev, { productId: p.productId, name: p.description, upc: p.items?.[0]?.itemId, price, img, qty: 1 }]);
+      }
+    });
+    setBulkText("");
+    setBulkResults([]);
+    setBulkDone(false);
+    setView("cart");
+  };
+
+  const toggleBulkItem = (idx) => {
+    setBulkResults(prev => prev.map((r, i) => i === idx ? { ...r, selected: !r.selected } : r));
   };
 
   const addToCart = (product) => {
@@ -146,10 +217,14 @@ function App() {
     summary: { background:"rgba(168,216,168,0.08)", border:"1px solid rgba(168,216,168,0.2)", borderRadius:14, padding:"18px 22px" },
     qtyBtn:  { background:"rgba(255,255,255,0.1)", border:"none", color:"#f0ece2", width:28, height:28, borderRadius:"50%", cursor:"pointer", fontSize:16 },
     greenBtn:(disabled) => ({ width:"100%", background:disabled?"rgba(168,216,168,0.3)":"#a8d8a8", color:"#0f2027", border:"none", borderRadius:12, padding:"15px", cursor:disabled?"not-allowed":"pointer", fontWeight:"bold", fontSize:15 }),
+    tab:     (active) => ({ flex:1, padding:"10px", background:active?"#a8d8a8":"rgba(255,255,255,0.06)", color:active?"#0f2027":"rgba(255,255,255,0.5)", border:"none", cursor:"pointer", fontFamily:"Georgia,serif", fontSize:14, fontWeight:active?"bold":"normal" }),
   };
+
+  const ingredients = parseIngredients(bulkText);
 
   return (
     <div style={G.page}>
+      {/* Header */}
       <div style={G.header}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <span style={{fontSize:24}}>🛒</span>
@@ -163,7 +238,7 @@ function App() {
             ? <span onClick={logout} title="Click to log out" style={{background:"rgba(168,216,168,0.2)",border:"1px solid #a8d8a8",color:"#a8d8a8",padding:"4px 12px",borderRadius:20,fontSize:12,cursor:"pointer"}}>✓ Connected</span>
             : <button onClick={loginWithKroger} style={{background:"rgba(255,200,100,0.15)",border:"1px solid rgba(255,200,100,0.4)",color:"#ffc864",padding:"6px 14px",borderRadius:20,cursor:"pointer",fontSize:13}}>Connect Kroger</button>
           }
-          <button onClick={() => setView(view==="search"?"cart":"search")}
+          <button onClick={() => setView(view==="cart"?"search":"cart")}
             style={{background:cart.length?"#a8d8a8":"rgba(255,255,255,0.1)",color:cart.length?"#0f2027":"#f0ece2",border:"none",borderRadius:20,padding:"6px 16px",cursor:"pointer",fontWeight:"bold",fontSize:13}}>
             🛍 {cart.length ? `Cart (${cart.length})` : "Cart"}
           </button>
@@ -173,16 +248,25 @@ function App() {
       <div style={G.body}>
         {tokenError && <div style={G.errBox}>⚠️ {tokenError}</div>}
 
+        {/* Tab bar for Search / Bulk */}
+        {view !== "cart" && (
+          <div style={{display:"flex",borderRadius:12,overflow:"hidden",marginBottom:22,border:"1px solid rgba(255,255,255,0.1)"}}>
+            <button style={G.tab(view==="search")} onClick={()=>setView("search")}>🔍 Search</button>
+            <button style={G.tab(view==="bulk")} onClick={()=>setView("bulk")}>📋 Paste List</button>
+          </div>
+        )}
+
+        {/* SEARCH VIEW */}
         {view==="search" && <>
-          <h1 style={{fontSize:28,fontWeight:"normal",marginBottom:6,letterSpacing:"-0.02em"}}>What are you shopping for?</h1>
-          <p style={{color:"rgba(255,255,255,0.4)",fontSize:13,marginBottom:20}}>Search Kroger's catalog and build your cart</p>
+          <h1 style={{fontSize:26,fontWeight:"normal",marginBottom:6,letterSpacing:"-0.02em"}}>What are you shopping for?</h1>
+          <p style={{color:"rgba(255,255,255,0.4)",fontSize:13,marginBottom:20}}>Search Kroger's catalog one item at a time</p>
           <div style={{display:"flex",gap:10}}>
             <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&searchProducts()}
               placeholder="e.g. organic milk, chicken, bananas..."
               style={{flex:1,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:12,padding:"13px 16px",color:"#f0ece2",fontSize:15}} />
             <button onClick={searchProducts} disabled={loading||!clientToken}
-              style={{background:loading||!clientToken?"rgba(168,216,168,0.3)":"#a8d8a8",color:"#0f2027",border:"none",borderRadius:12,padding:"13px 22px",cursor:loading?"not-allowed":"pointer",fontWeight:"bold",fontSize:14,whiteSpace:"nowrap"}}>
-              {loading?"Searching...":"Search"}
+              style={{background:loading||!clientToken?"rgba(168,216,168,0.3)":"#a8d8a8",color:"#0f2027",border:"none",borderRadius:12,padding:"13px 20px",cursor:loading?"not-allowed":"pointer",fontWeight:"bold",fontSize:14,whiteSpace:"nowrap"}}>
+              {loading?"...":"Search"}
             </button>
           </div>
           {error && <div style={{...G.errBox,marginTop:14}}>⚠️ {error}</div>}
@@ -206,205 +290,111 @@ function App() {
             </div>
           )}
           {!loading && results.length===0 && (
-            <div style={{textAlign:"center",color:"rgba(255,255,255,0.2)",padding:"50px 0"}}>
+            <div style={{textAlign:"center",color:"rgba(255,255,255,0.2)",padding:"40px 0"}}>
               <div style={{fontSize:44}}>🥦🥩🥛🍞</div>
               <div style={{marginTop:14,fontSize:15,color:"rgba(255,255,255,0.3)"}}>Search above to browse Kroger's catalog</div>
             </div>
           )}
         </>}
 
-        {view==="cart" && <>
-          <h1 style={{fontSize:28,fontWeight:"normal",marginBottom:20,letterSpacing:"-0.02em"}}>Your Cart</h1>
-          {cart.length===0
-            ? <div style={{textAlign:"center",color:"rgba(255,255,255,0.3)",padding:"50px 0"}}>
-                <div style={{fontSize:44}}>🛒</div>
-                <div style={{marginTop:14}}>Your cart is empty</div>
-                <button onClick={()=>setView("search")} style={{marginTop:16,background:"#a8d8a8",color:"#0f2027",border:"none",borderRadius:10,padding:"10px 24px",cursor:"pointer",fontWeight:"bold"}}>Start Shopping</button>
+        {/* BULK VIEW */}
+        {view==="bulk" && <>
+          <h1 style={{fontSize:26,fontWeight:"normal",marginBottom:6,letterSpacing:"-0.02em"}}>Paste Your Shopping List</h1>
+          <p style={{color:"rgba(255,255,255,0.4)",fontSize:13,marginBottom:20}}>One ingredient per line — I'll find everything automatically</p>
+
+          {!bulkDone && <>
+            <textarea
+              value={bulkText}
+              onChange={e=>setBulkText(e.target.value)}
+              placeholder={"All-purpose flour\nChicken pieces\nVegetable oil\nWhole peeled tomatoes\nLong-grain rice\nCelery\nOnion"}
+              rows={10}
+              style={{width:"100%",background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:12,padding:"14px 16px",color:"#f0ece2",fontSize:14,lineHeight:1.6,resize:"vertical"}}
+            />
+            {ingredients.length > 0 && (
+              <div style={{fontSize:12,color:"rgba(255,255,255,0.35)",marginTop:6,marginBottom:14}}>
+                {ingredients.length} ingredient{ingredients.length!==1?"s":""} detected
               </div>
-            : <>
-                <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20}}>
-                  {cart.map(item=>(
-                    <div key={item.productId} style={G.cartRow}>
-                      {item.img && <img src={item.img} alt={item.name} style={{width:52,height:52,objectFit:"contain",flexShrink:0}}/>}
-                      <div style={{flex:1}}>
-                        <div style={{fontSize:13,lineHeight:1.4}}>{item.name}</div>
-                        {item.price && <div style={{color:"#a8d8a8",fontSize:13,marginTop:2}}>${(item.price*item.qty).toFixed(2)}</div>}
-                      </div>
-                      <div style={{display:"flex",alignItems:"center",gap:6}}>
-                        <button style={G.qtyBtn} onClick={()=>updateQty(item.productId,-1)}>−</button>
-                        <span style={{minWidth:18,textAlign:"center",fontSize:14}}>{item.qty}</span>
-                        <button style={G.qtyBtn} onClick={()=>updateQty(item.productId,1)}>+</button>
-                      </div>
-                      <button onClick={()=>removeFromCart(item.productId)} style={{background:"none",border:"none",color:"rgba(255,100,100,0.6)",cursor:"pointer",fontSize:18,paddingLeft:6}}>✕</button>
-                    </div>
-                  ))}
-                </div>
-                <div style={G.summary}>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:14}}>
-                    <span style={{color:"rgba(255,255,255,0.55)",fontSize:14}}>Estimated Total</span>
-                    <span style={{fontSize:20,fontWeight:"bold",color:"#a8d8a8"}}>${total.toFixed(2)}</span>
-                  </div>
-                  {cartStatus==="success" && <div style={{color:"#a8d8a8",textAlign:"center",marginBottom:12,fontSize:14}}>✓ Items added to your Kroger cart!</div>}
-                  {cartStatus?.startsWith("error") && <div style={{color:"#ff9999",textAlign:"center",marginBottom:12,fontSize:13}}>⚠️ {cartStatus}</div>}
-                  <button onClick={sendToKrogerCart} disabled={cartLoading} style={G.greenBtn(cartLoading)}>
-                    {cartLoading?"Sending to Kroger...":userToken?"Send to Kroger Cart":"Connect Kroger & Send to Cart"}
-                  </button>
-                  {!userToken && <p style={{fontSize:11,color:"rgba(255,255,255,0.3)",textAlign:"center",marginTop:8}}>You'll log into your Kroger account</p>}
-                </div>
-                <button onClick={()=>setView("search")} style={{marginTop:12,background:"none",border:"1px solid rgba(255,255,255,0.15)",color:"rgba(255,255,255,0.45)",borderRadius:10,padding:"10px 18px",cursor:"pointer",width:"100%",fontSize:14}}>
-                  ← Continue Shopping
-                </button>
-              </>
-          }
-        </>}
-      </div>
-    </div>
-  );
-}
-
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
-</script>
-</body>
-</html>
-    if (code) {
-      const redirectUri = window.location.origin + window.location.pathname;
-      api.exchangeCode(code, redirectUri).then(d => {
-        if (d.access_token) {
-          setUserToken(d.access_token);
-          window.history.replaceState({}, "", window.location.pathname);
-        }
-      });
-    }
-  }, []);
-
-  const loginWithKroger = () => {
-    const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
-    const scope = encodeURIComponent("cart.basic:write profile.compact");
-    window.location.href = `${AUTH_URL}?client_id=${CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}`;
-  };
-
-  const searchProducts = async () => {
-    if (!query.trim() || !clientToken) return;
-    setLoading(true); setError(null);
-    try {
-      const data = await api.search(query, clientToken);
-      if (!data.data) throw new Error(data.error || "No results returned");
-      setResults(data.data);
-    } catch(e) { setError(e.message); }
-    finally { setLoading(false); }
-  };
-
-  const addToCart = (product) => {
-    const existing = cart.find(i => i.productId === product.productId);
-    if (existing) {
-      setCart(cart.map(i => i.productId === product.productId ? { ...i, qty: i.qty + 1 } : i));
-    } else {
-      const price = product.items?.[0]?.price?.regular ?? null;
-      const img   = product.images?.[0]?.sizes?.find(s => s.size === "thumbnail")?.url
-                 || product.images?.[0]?.sizes?.[0]?.url || null;
-      setCart([...cart, { productId: product.productId, name: product.description,
-        upc: product.items?.[0]?.itemId, price, img, qty: 1 }]);
-    }
-  };
-
-  const removeFromCart = id => setCart(cart.filter(i => i.productId !== id));
-  const updateQty = (id, d) => setCart(cart.map(i => i.productId === id ? { ...i, qty: Math.max(1, i.qty + d) } : i));
-
-  const sendToKrogerCart = async () => {
-    if (!userToken) { loginWithKroger(); return; }
-    setCartLoading(true); setCartStatus(null);
-    try {
-      const items = cart.map(i => ({ upc: i.upc, quantity: i.qty, modality: "PICKUP" }));
-      const res = await api.addToCart(items, userToken);
-      if (!res.ok) throw new Error(`Error ${res.status}`);
-      setCartStatus("success");
-    } catch(e) { setCartStatus("error: " + e.message); }
-    finally { setCartLoading(false); }
-  };
-
-  const total = cart.reduce((s, i) => s + (i.price || 0) * i.qty, 0);
-
-  const G = {
-    page:    { minHeight:"100vh", background:"linear-gradient(135deg,#0f2027,#203a43,#2c5364)", fontFamily:"Georgia,serif", color:"#f0ece2" },
-    header:  { background:"rgba(255,255,255,0.05)", backdropFilter:"blur(12px)", borderBottom:"1px solid rgba(255,255,255,0.1)", padding:"14px 20px", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100 },
-    body:    { maxWidth:780, margin:"0 auto", padding:"22px 16px" },
-    errBox:  { background:"rgba(255,100,100,0.15)", border:"1px solid rgba(255,100,100,0.4)", borderRadius:12, padding:"10px 14px", marginBottom:18, fontSize:13, color:"#ff9999" },
-    grid:    { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:14, marginTop:16 },
-    card:    { background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:14, padding:14, display:"flex", flexDirection:"column", gap:8 },
-    cartRow: { background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:13, padding:"12px 16px", display:"flex", alignItems:"center", gap:14 },
-    summary: { background:"rgba(168,216,168,0.08)", border:"1px solid rgba(168,216,168,0.2)", borderRadius:14, padding:"18px 22px" },
-    qtyBtn:  { background:"rgba(255,255,255,0.1)", border:"none", color:"#f0ece2", width:28, height:28, borderRadius:"50%", cursor:"pointer", fontSize:16 },
-    greenBtn:(disabled) => ({ width:"100%", background:disabled?"rgba(168,216,168,0.3)":"#a8d8a8", color:"#0f2027", border:"none", borderRadius:12, padding:"15px", cursor:disabled?"not-allowed":"pointer", fontWeight:"bold", fontSize:15 }),
-  };
-
-  return (
-    <div style={G.page}>
-      <div style={G.header}>
-        <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <span style={{fontSize:24}}>🛒</span>
-          <div>
-            <div style={{fontSize:19,fontWeight:"bold",color:"#a8d8a8",letterSpacing:"0.05em"}}>KrogerCart</div>
-            <div style={{fontSize:10,color:"rgba(255,255,255,0.35)",letterSpacing:"0.12em"}}>POWERED BY KROGER API</div>
-          </div>
-        </div>
-        <div style={{display:"flex",gap:10,alignItems:"center"}}>
-          {userToken
-            ? <span style={{background:"rgba(168,216,168,0.2)",border:"1px solid #a8d8a8",color:"#a8d8a8",padding:"4px 12px",borderRadius:20,fontSize:12}}>✓ Connected</span>
-            : <button onClick={loginWithKroger} style={{background:"rgba(255,200,100,0.15)",border:"1px solid rgba(255,200,100,0.4)",color:"#ffc864",padding:"6px 14px",borderRadius:20,cursor:"pointer",fontSize:13}}>Connect Kroger</button>
-          }
-          <button onClick={() => setView(view==="search"?"cart":"search")}
-            style={{background:cart.length?"#a8d8a8":"rgba(255,255,255,0.1)",color:cart.length?"#0f2027":"#f0ece2",border:"none",borderRadius:20,padding:"6px 16px",cursor:"pointer",fontWeight:"bold",fontSize:13}}>
-            🛍 {cart.length ? `Cart (${cart.length})` : "Cart"}
-          </button>
-        </div>
-      </div>
-
-      <div style={G.body}>
-        {tokenError && <div style={G.errBox}>⚠️ {tokenError}</div>}
-
-        {view==="search" && <>
-          <h1 style={{fontSize:28,fontWeight:"normal",marginBottom:6,letterSpacing:"-0.02em"}}>What are you shopping for?</h1>
-          <p style={{color:"rgba(255,255,255,0.4)",fontSize:13,marginBottom:20}}>Search Kroger's catalog and build your cart</p>
-          <div style={{display:"flex",gap:10}}>
-            <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&searchProducts()}
-              placeholder="e.g. organic milk, chicken, bananas..."
-              style={{flex:1,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:12,padding:"13px 16px",color:"#f0ece2",fontSize:15}} />
-            <button onClick={searchProducts} disabled={loading||!clientToken}
-              style={{background:loading||!clientToken?"rgba(168,216,168,0.3)":"#a8d8a8",color:"#0f2027",border:"none",borderRadius:12,padding:"13px 22px",cursor:loading?"not-allowed":"pointer",fontWeight:"bold",fontSize:14,whiteSpace:"nowrap"}}>
-              {loading?"Searching...":"Search"}
+            )}
+            <button
+              onClick={runBulkSearch}
+              disabled={bulkLoading || !clientToken || ingredients.length===0}
+              style={{...G.greenBtn(bulkLoading || !clientToken || ingredients.length===0), marginTop:4}}
+            >
+              {bulkLoading
+                ? `Searching... (${bulkProgress}/${ingredients.length})`
+                : `🔍 Find All ${ingredients.length > 0 ? `(${ingredients.length})` : ""} Items`}
             </button>
-          </div>
-          {error && <div style={{...G.errBox,marginTop:14}}>⚠️ {error}</div>}
-          {results.length > 0 && (
-            <div style={G.grid}>
-              {results.map(p => {
-                const img   = p.images?.[0]?.sizes?.find(s=>s.size==="thumbnail")?.url || p.images?.[0]?.sizes?.[0]?.url;
-                const price = p.items?.[0]?.price?.regular;
-                const inCart= cart.find(i=>i.productId===p.productId);
-                return (
-                  <div key={p.productId} style={G.card}>
-                    {img && <img src={img} alt={p.description} style={{width:"100%",height:100,objectFit:"contain"}}/>}
-                    <div style={{fontSize:12,lineHeight:1.4}}>{p.description}</div>
-                    {price && <div style={{color:"#a8d8a8",fontWeight:"bold",fontSize:15}}>${price.toFixed(2)}</div>}
-                    <button onClick={()=>addToCart(p)}
-                      style={{background:inCart?"rgba(168,216,168,0.2)":"#a8d8a8",color:inCart?"#a8d8a8":"#0f2027",border:inCart?"1px solid #a8d8a8":"none",borderRadius:8,padding:"7px",cursor:"pointer",fontWeight:"bold",fontSize:12}}>
-                      {inCart?`✓ In Cart (${inCart.qty})`:"+  Add to Cart"}
-                    </button>
+
+            {/* Progress bar */}
+            {bulkLoading && (
+              <div style={{marginTop:14,background:"rgba(255,255,255,0.08)",borderRadius:8,overflow:"hidden",height:6}}>
+                <div style={{height:"100%",background:"#a8d8a8",width:`${(bulkProgress/ingredients.length)*100}%`,transition:"width 0.3s"}}/>
+              </div>
+            )}
+
+            {/* Live results while searching */}
+            {bulkResults.length > 0 && bulkLoading && (
+              <div style={{marginTop:16,display:"flex",flexDirection:"column",gap:8}}>
+                {bulkResults.map((r,i) => (
+                  <div key={i} style={{background:"rgba(255,255,255,0.05)",borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
+                    <span style={{fontSize:16}}>{r.product?"✅":"❌"}</span>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:12,color:"rgba(255,255,255,0.5)"}}>{r.ingredient}</div>
+                      {r.product && <div style={{fontSize:13,color:"#f0ece2"}}>{r.product.description}</div>}
+                      {!r.product && <div style={{fontSize:12,color:"#ff9999"}}>Not found</div>}
+                    </div>
                   </div>
-                );
-              })}
+                ))}
+              </div>
+            )}
+          </>}
+
+          {/* Review results */}
+          {bulkDone && bulkResults.length > 0 && <>
+            <div style={{marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{fontSize:14,color:"rgba(255,255,255,0.6)"}}>
+                Review matches — tap to deselect any you don't want
+              </div>
+              <div style={{fontSize:13,color:"#a8d8a8",fontWeight:"bold"}}>
+                {bulkResults.filter(r=>r.selected).length} selected
+              </div>
             </div>
-          )}
-          {!loading && results.length===0 && (
-            <div style={{textAlign:"center",color:"rgba(255,255,255,0.2)",padding:"50px 0"}}>
-              <div style={{fontSize:44}}>🥦🥩🥛🍞</div>
-              <div style={{marginTop:14,fontSize:15,color:"rgba(255,255,255,0.3)"}}>Search above to browse Kroger's catalog</div>
+            <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20}}>
+              {bulkResults.map((r,i) => (
+                <div key={i} onClick={()=>r.product&&toggleBulkItem(i)}
+                  style={{background:r.selected?"rgba(168,216,168,0.08)":"rgba(255,255,255,0.04)",border:r.selected?"1px solid rgba(168,216,168,0.3)":"1px solid rgba(255,255,255,0.08)",borderRadius:12,padding:"12px 14px",display:"flex",alignItems:"center",gap:12,cursor:r.product?"pointer":"default",opacity:r.product?1:0.5}}>
+                  <div style={{width:22,height:22,borderRadius:"50%",border:"2px solid",borderColor:r.selected?"#a8d8a8":"rgba(255,255,255,0.2)",background:r.selected?"#a8d8a8":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                    {r.selected && <span style={{color:"#0f2027",fontSize:13,fontWeight:"bold"}}>✓</span>}
+                  </div>
+                  {r.product?.images?.[0]?.sizes?.find(s=>s.size==="thumbnail")?.url && (
+                    <img src={r.product.images[0].sizes.find(s=>s.size==="thumbnail").url} alt="" style={{width:44,height:44,objectFit:"contain",flexShrink:0}}/>
+                  )}
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:11,color:"rgba(255,255,255,0.4)",marginBottom:2}}>🔍 {r.ingredient}</div>
+                    {r.product
+                      ? <div style={{fontSize:13,color:"#f0ece2",lineHeight:1.3}}>{r.product.description}</div>
+                      : <div style={{fontSize:13,color:"#ff9999"}}>No match found</div>
+                    }
+                    {r.product?.items?.[0]?.price?.regular && (
+                      <div style={{fontSize:13,color:"#a8d8a8",marginTop:2}}>${r.product.items[0].price.regular.toFixed(2)}</div>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
-          )}
+
+            <button onClick={addBulkToCart} disabled={bulkResults.filter(r=>r.selected).length===0} style={G.greenBtn(bulkResults.filter(r=>r.selected).length===0)}>
+              🛍 Add {bulkResults.filter(r=>r.selected).length} Items to Cart
+            </button>
+            <button onClick={()=>{setBulkDone(false);setBulkResults([]);}} style={{marginTop:10,background:"none",border:"1px solid rgba(255,255,255,0.15)",color:"rgba(255,255,255,0.45)",borderRadius:10,padding:"10px 18px",cursor:"pointer",width:"100%",fontSize:14}}>
+              ← Start Over
+            </button>
+          </>}
         </>}
 
+        {/* CART VIEW */}
         {view==="cart" && <>
-          <h1 style={{fontSize:28,fontWeight:"normal",marginBottom:20,letterSpacing:"-0.02em"}}>Your Cart</h1>
+          <h1 style={{fontSize:26,fontWeight:"normal",marginBottom:20,letterSpacing:"-0.02em"}}>Your Cart</h1>
           {cart.length===0
             ? <div style={{textAlign:"center",color:"rgba(255,255,255,0.3)",padding:"50px 0"}}>
                 <div style={{fontSize:44}}>🛒</div>
