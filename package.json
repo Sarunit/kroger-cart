@@ -1,0 +1,16 @@
+{
+  "name": "kroger-cart-app",
+  "version": "1.0.0",
+  "description": "Kroger grocery cart app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
